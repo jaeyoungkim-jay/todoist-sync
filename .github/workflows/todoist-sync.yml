@@ -1,18 +1,22 @@
 name: Todoist sync
 on:
   schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch: {}
+    - cron: "0 22,4,10 * * *"   # 한국시간 07시·13시·19시에 시작, 각각 약 6시간 동안 1분마다 확인 (23시 종료)
+  workflow_dispatch: {}         # Actions 탭에서 수동 실행 (한 번만 동기화)
+concurrency:
+  group: todoist-${{ github.event_name }}
+  cancel-in-progress: true
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 358
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python sync.py
         env:
+          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '350' || '0' }}
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
           ATLASSIAN_EMAIL: ${{ secrets.ATLASSIAN_EMAIL }}
           ATLASSIAN_TOKEN: ${{ secrets.ATLASSIAN_TOKEN }}
