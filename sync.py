@@ -31,40 +31,63 @@ def todoist(path):
         if e.code in (401, 403): raise
         return req(f"https://api.todoist.com/rest/v2/{path}", h)
 
-projects = {str(p["id"]): p.get("name", "") for p in todoist("projects")}
-tasks = []
-for t in todoist("tasks"):
-    if t.get("checked") or t.get("is_completed") or t.get("is_deleted"): continue
-    due = t.get("due") or {}
-    tasks.append({
-        "id": str(t["id"]),
-        "text": t.get("content", ""),
-        "project": projects.get(str(t.get("project_id")), ""),
-        "parent": str(t["parent_id"]) if t.get("parent_id") else "",
-        "date": (due.get("date") or "")[:10],
-        "time": (due.get("datetime") or "")[11:16] if due.get("datetime") and "T" in due.get("datetime") else "",
-        "recurring": bool(due.get("is_recurring")),
-        "priority": t.get("priority", 1),
-        "order": t.get("child_order", t.get("order", 0)),
-    })
-tasks.sort(key=lambda x: (x["project"], x["order"]))
-data = {"v": 1, "tasks": tasks}
-payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-sig = hashlib.sha1(payload.encode()).hexdigest()[:12]
-
+import time
 auth = "Basic " + base64.b64encode(f"{EMAIL}:{ATOKEN}".encode()).decode()
-H = {"Authorization": auth, "Accept": "application/json", "Content-Type": "application/json"}
-page = req(f"{SITE}/wiki/api/v2/pages/{PAGE}?body-format=storage", H)
-old = ((page.get("body") or {}).get("storage") or {}).get("value", "")
-if f"sig:{sig}" in old:
-    print("변경 없음 — 건너뜀"); sys.exit(0)
 
-now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
-body = (f"<p>데일리 보드용 자동 동기화 페이지입니다. 직접 고치지 마세요. 마지막 동기화 {now} (KST) · 할 일 {len(tasks)}건 · sig:{sig}</p>"
-        f'<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">json</ac:parameter>'
-        f"<ac:plain-text-body><![CDATA[TODOIST_JSON {payload} TODOIST_END]]></ac:plain-text-body></ac:structured-macro>")
-upd = {"id": PAGE, "status": "current", "title": page["title"],
-       "body": {"representation": "storage", "value": body},
-       "version": {"number": page["version"]["number"] + 1, "message": "todoist sync"}}
-req(f"{SITE}/wiki/api/v2/pages/{PAGE}", H, json.dumps(upd).encode(), "PUT")
-print(f"업데이트 완료: {len(tasks)}건")
+LAST = {"sig": ""}
+def sync_once():
+    projects = {str(p["id"]): p.get("name", "") for p in todoist("projects")}
+    tasks = []
+    for t in todoist("tasks"):
+        if t.get("checked") or t.get("is_completed") or t.get("is_deleted"): continue
+        due = t.get("due") or {}
+        tasks.append({
+            "id": str(t["id"]),
+            "text": t.get("content", ""),
+            "project": projects.get(str(t.get("project_id")), ""),
+            "parent": str(t["parent_id"]) if t.get("parent_id") else "",
+            "date": (due.get("date") or "")[:10],
+            "time": (due.get("datetime") or "")[11:16] if due.get("datetime") and "T" in due.get("datetime") else "",
+            "recurring": bool(due.get("is_recurring")),
+            "priority": t.get("priority", 1),
+            "order": t.get("child_order", t.get("order", 0)),
+        })
+    tasks.sort(key=lambda x: (x["project"], x["order"]))
+    data = {"v": 1, "tasks": tasks}
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    sig = hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+    if sig == LAST["sig"]:
+        return False
+    H = {"Authorization": auth, "Accept": "application/json", "Content-Type": "application/json"}
+    page = req(f"{SITE}/wiki/api/v2/pages/{PAGE}?body-format=storage", H)
+    old = ((page.get("body") or {}).get("storage") or {}).get("value", "")
+    if f"sig:{sig}" in old:
+        LAST["sig"] = sig
+        return False
+
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+    body = (f"<p>데일리 보드용 자동 동기화 페이지입니다. 직접 고치지 마세요. 마지막 동기화 {now} (KST) · 할 일 {len(tasks)}건 · sig:{sig}</p>"
+            f'<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">json</ac:parameter>'
+            f"<ac:plain-text-body><![CDATA[TODOIST_JSON {payload} TODOIST_END]]></ac:plain-text-body></ac:structured-macro>")
+    upd = {"id": PAGE, "status": "current", "title": page["title"],
+           "body": {"representation": "storage", "value": body},
+           "version": {"number": page["version"]["number"] + 1, "message": "todoist sync"}}
+    req(f"{SITE}/wiki/api/v2/pages/{PAGE}", H, json.dumps(upd).encode(), "PUT")
+    LAST["sig"] = sig
+    print(f"업데이트 완료: {len(tasks)}건", flush=True)
+    return True
+
+
+# LOOP_MINUTES가 있으면 그 시간 동안 1분마다 확인(바뀐 게 있을 때만 페이지 갱신), 밤 11시(KST)엔 종료
+LOOP = int(os.environ.get("LOOP_MINUTES", "0") or 0)
+start = time.time()
+while True:
+    try:
+        sync_once()
+    except Exception as e:
+        print("오류:", type(e).__name__, getattr(e, "code", ""), flush=True)
+        if not LOOP: raise
+    kst = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    if not LOOP or time.time() - start > LOOP * 60 or kst.hour >= 23: break
+    time.sleep(60)
